@@ -1,0 +1,209 @@
+---
+title: "Recomendador de vinos (Tarea 4)"
+author: "Mario Guillem"
+date: '27/12/2022'
+output:
+   html_document:
+     theme: paper
+     toc: true
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(pacman)
+p_load(recommenderlab, ggplot2, tidyverse, highcharter, htmltools, imputeTS)
+```
+
+## Introducción
+
+<div style="text-align: justify">En esta práctica vamos a realizar un sistema de recomendación colaborativo basado en productos, en nuestro caso los productos a recomendar serán vinos.
+La base de datos cuenta con un total de 129971 observaciones y 14 variables.<div/>
+
+```{r datos}
+df <- read.csv("C:/Users/Mario/Desktop/wines.csv")
+
+#Buscamos NA's en la base de datos:
+sum(is.na(df))
+nulls <- sapply(df, function(x) sum(is.na(x)))
+nulls
+```
+
+<div style="text-align: justify">Podemos observar como la única columna que cuenta con NA's es la de los precios, es por ello que vamos a reemplazar los NA's (8996) por la media ya que eliminarlos directamente nos parecería reducir signifactivamente nuestro dataset, estaríamos eliminando casi el 7% de las observaciones.<div/>
+
+### Sustitución de NA's
+
+<div style="text-align: justify">Para sustituir los NA's por la media de los precios utilizaremos la funcion imputeTS.<div/>
+```{r preciosNA}
+
+
+media <- df%>%
+  na_mean()
+
+df <- media   
+
+#Eliminamos las valoraciones duplicadas.
+df <- df[!duplicated(df[,c("taster_name", "title")]),]
+
+```
+
+
+## Exploratory Data Analysis
+
+<div style="text-align: justify">A continuación, vamos a analizar los vinos de nuestro dataset:<div/>
+```{r EDA}
+
+# MEJORES VINOS:
+
+mej_vinos = df %>%
+  select(title, price, points) %>%
+  filter(title != '' & points == 100) %>%
+  arrange(price) %>%
+  head(10)
+
+(mej_vinos)
+
+# PEORES VINOS:
+
+peores = df %>%
+  select(title, price, points) %>%
+  filter(title != '' & points < 85) %>%
+  arrange(points) %>%
+  head(10)
+
+peores
+
+
+# MÁS CAROS:
+
+caros = df %>%
+  select(title, price, points) %>%
+  filter(title != '') %>%
+  mutate(price = as.integer(price)) %>%
+  arrange(desc(price)) %>%
+  head(10)
+
+caros
+
+#MÁS BARATOS:
+
+baratos = df %>%
+  select(title, price, points) %>%
+  filter(title != '' & price < 10 & points >= 90) %>%
+  mutate(price = as.integer(price)) %>%
+  arrange(price) %>%
+  head(10)
+
+baratos
+
+# MEJORES CALIDAD-PRECIO:
+
+cal.pre = df %>%
+  select(title, price, points) %>%
+  filter(title != '' & points > 95) %>%
+  mutate(price = as.integer(price)) %>%
+  arrange(price) %>%
+  head(10)
+
+cal.pre
+
+```
+
+## Preprocesamiento de los datos
+
+<div style="text-align: justify">Antes de realizar el sistema de recomendación nos aseguraremos que nuestra base de datos se encuentra completa y con valores únicos, ya que si hubieran valores repetidos nos recomendaría ese mismo vino ya que la similitud sería máxima. Por otro lado, tan sólo nos quedaremos con los usuarios que hayan realizado más de 100 valoraciones. Entendemos que tendrán una mayor experiencia y sus valoraciones serán más fiables.<div/>
+```{r prep, warning=FALSE}
+
+#Nos aseguramos que no haya ningún nombre del catador vacío ni el título o nombre del vino vacío.
+
+rating_df <- df %>% select(taster_name, title, points) %>% filter(taster_name != '' & title != '') %>% mutate(points = as.numeric(points)) %>% drop_na() 
+
+#Eliminamos los duplicados como hemos hecho anteriormente.
+rating_df <- rating_df[!duplicated(rating_df[,c("taster_name", "title")]),]
+
+#Creamos la matriz de valoraciones
+rating_matrix <- as(rating_df, "realRatingMatrix")                
+print(paste(dim(rating_matrix)[1], 'users rated', dim(rating_matrix)[2], 'wines'))
+
+ratings <- as.vector(rating_matrix@data)           
+ratings <- round(ratings)
+ratings <- factor(ratings)
+ratings <- ratings[ratings != 0]
+
+#Vemos cuantos vinos han recibido cada valoración:
+table(ratings)  
+
+
+
+temp_df <- df %>% filter(points >= 90)
+temp_df$points = as.character(temp_df$points)        
+
+n_user_ratings = rowCounts(rating_matrix)
+n_user_ratings                
+
+
+rating_matrix <- rating_matrix[n_user_ratings > 100]
+
+qplot(ratings, 
+      fill=ratings
+     ) + ggtitle("Distribución de las valoraciones") + theme_minimal() + 
+     theme(legend.position = "none")
+
+```
+
+Podríamos decir que la distribución de las valoraciones se asemeja a una distribución normal.
+
+## Sistema de Recomendación Colaborativo Basado en Vinos
+
+```{r}
+
+
+cos_similarity = function(A,B){
+  A = as.numeric(A)
+  B = as.numeric(B)  
+  num = sum(A * B, na.rm = T)
+  den = sqrt(sum(A^2, na.rm = T)) * sqrt(sum(B^2, na.rm = T)) 
+  output = num/den
+  
+  return(output)
+} 
+
+
+matrix_item = rating_df %>%
+  group_by(title) %>%
+  pivot_wider(names_from = title, values_from = points) %>%
+  as.data.frame()
+
+row.names(matrix_item) = matrix_item$taster_name
+matrix_item$taster_name = NULL
+
+matrix_item = as.matrix(matrix_item)
+
+recomendador = function(wine_name, rating_matrix = matrix_item, n_recommendations = 10){
+  print(paste('Vinos similares a: ', wine_name))
+  
+  indice = which(colnames(rating_matrix) == wine_name)
+  similarity = apply(rating_matrix, 2, FUN = function(y) cos_similarity(rating_matrix[,indice], y))
+  
+  vinos_similares = tibble(Wine = names(similarity), 
+                         similarity = similarity                           
+  ) %>%
+    filter(Wine != wine_name & similarity >= 0.5) %>% 
+    top_n(n_recommendations, similarity) %>%
+    arrange(desc(similarity)) %>%
+    head(n_recommendations)
+  
+  recomendaciones = df %>%
+    filter(title %in% vinos_similares$Wine) %>%
+    mutate(similarity = vinos_similares$similarity) %>%
+    group_by(title) %>% select(title, price, points, country)
+  
+  return(recomendaciones)
+  
+}                
+
+#Ejemplo de uso del recomendador:
+
+recomendador("Louis M. Martini 2012 Cabernet Sauvignon (Alexander Valley)")
+
+```
+
+
